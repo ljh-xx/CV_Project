@@ -1,0 +1,45 @@
+model:
+  arch: se_resnet18
+  type: task_specific_student_bundle
+  tasks:
+    Task1:
+      num_classes: 102
+    Task2:
+      num_classes: 100
+    Task3:
+      num_classes: 101
+    Task4:
+      num_classes: 37
+  params_million: 11.311
+  flops_gflops: 0.289
+
+checkpoint:
+  file: ../模型文件/best_model.pth
+  format: torch_bundle
+  key: tasks.<Taskx>.state_dict
+
+data:
+  expected_root: DLUT_VLG_2026_本科生/data
+  test_subdir: <Taskx>/test
+
+inference:
+  image_size: 84
+  resize: 84
+  crop: center
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  score_dir: ../Score
+
+distillation:
+  seed: 2026
+  student_init: official_pretrain_se_resnet18
+  teacher_use: soft_labels_only
+  final_score_source: student_model
+
+validation:
+  Task1: 99.71811134601832
+  Task2: 97.49798224374496
+  Task3: 80.64356435643565
+  Task4: 94.97282608695652
+  average: 93.20812100828886

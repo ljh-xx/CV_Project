@@ -1,0 +1,32 @@
+# Models
+*.pth
+*.pt
+*.ckpt
+
+# Data
+data/
+Score/
+Score_*/
+Submission/
+Submission_*/
+Score_teacher*/
+Score_teacher_test/
+Score_student/
+
+# Results
+results/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE
+.idea/
+
+# Misc
+.DS_Store
+*.mat
+*.pdf
