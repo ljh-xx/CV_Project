@@ -15,7 +15,6 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
 from models import model_dict
-from utils.test_imagefolder import TestImageFolder
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -31,10 +30,12 @@ def parse_args():
     parser.add_argument("--num-classes", required=True, type=int)
     parser.add_argument("--arch", default="se_resnet18", choices=sorted(model_dict))
     parser.add_argument("--pretrained", default="")
-    parser.add_argument("--teacher-score", required=True)
-    parser.add_argument("--split", default="val", choices=["val", "test"])
+    parser.add_argument("--teacher-score", required=True,
+                        help="Path to teacher soft label CSV")
+    parser.add_argument("--split", default="train", choices=["train", "val"],
+                        help="train: distill on train (k-fold teacher labels); "
+                             "val: distill on val (teacher labels)")
     parser.add_argument("--result", default="results/distill")
-    parser.add_argument("--score-result", default="Score_student")
     parser.add_argument("--epochs", default=80, type=int)
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--query-batch-size", default=256, type=int)
@@ -52,34 +53,28 @@ def parse_args():
 
 
 def train_transform():
-    return transforms.Compose(
-        [
-            transforms.Resize(92),
-            transforms.RandomCrop(84),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
+    return transforms.Compose([
+        transforms.Resize(92),
+        transforms.RandomCrop(84),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
 
 
 def eval_transform():
-    return transforms.Compose(
-        [
-            transforms.Resize(84),
-            transforms.CenterCrop(84),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
+    return transforms.Compose([
+        transforms.Resize(84),
+        transforms.CenterCrop(84),
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
 
 
 class SoftScoreDataset(Dataset):
-    def __init__(self, root, split, transform, score_file):
-        if split == "test":
-            self.dataset = TestImageFolder(root, transform=transform)
-        else:
-            self.dataset = ImageFolder(root, transform=transform)
+    """Dataset that returns (image, hard_label, teacher_soft_label)."""
+    def __init__(self, root, transform, score_file):
+        self.dataset = ImageFolder(root, transform=transform)
         scores = pd.read_csv(score_file, index_col=0).astype("float32")
         if len(scores) != len(self.dataset):
             raise ValueError(
@@ -107,45 +102,46 @@ def load_student(args, device):
             if key in current and current[key].shape == value.shape
         }
         missing, unexpected = model.load_state_dict(compatible, strict=False)
-        print(
-            json.dumps(
-                {
-                    "loaded_pretrained": args.pretrained,
-                    "compatible_keys": len(compatible),
-                    "missing_keys": len(missing),
-                    "unexpected_keys": len(unexpected),
-                },
-                sort_keys=True,
-            )
-        )
+        print(json.dumps({
+            "loaded_pretrained": args.pretrained,
+            "compatible_keys": len(compatible),
+            "missing_keys": len(missing),
+            "unexpected_keys": len(unexpected),
+        }, sort_keys=True))
     return model.to(device)
 
 
 def soft_ce(logits, targets, temperature):
     log_probs = F.log_softmax(logits / temperature, dim=1)
-    return -(targets * log_probs).sum(dim=1).mean() * (temperature**2)
+    return -(targets * log_probs).sum(dim=1).mean() * (temperature ** 2)
 
 
-def evaluate(model, loader, device, write_score_path=None):
+def evaluate_soft(model, loader, device):
+    """Evaluate on SoftScoreDataset (has teacher labels)."""
     model.eval()
-    total = 0
-    correct = 0
-    probs_out = []
+    total, correct = 0, 0
     with torch.no_grad():
         for images, labels, _ in loader:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             probs = F.softmax(model(images), dim=1)
-            probs_out.append(probs.cpu())
             correct += (probs.argmax(dim=1) == labels).sum().item()
             total += labels.numel()
-    acc = correct / total * 100.0 if total else None
-    if write_score_path is not None:
-        probs = torch.cat(probs_out, dim=0)
-        index = [f"{write_score_path.stem.replace('_score', '')}_{i:05d}" for i in range(probs.size(0))]
-        columns = [f"score_{i}" for i in range(probs.size(1))]
-        pd.DataFrame(probs.numpy(), index=index, columns=columns).to_csv(write_score_path)
-    return acc
+    return correct / total * 100.0 if total else None
+
+
+def evaluate_hard(model, loader, device):
+    """Evaluate on standard ImageFolder (no teacher labels)."""
+    model.eval()
+    total, correct = 0, 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            probs = F.softmax(model(images), dim=1)
+            correct += (probs.argmax(dim=1) == labels).sum().item()
+            total += labels.numel()
+    return correct / total * 100.0 if total else None
 
 
 def main():
@@ -158,60 +154,60 @@ def main():
 
     result_dir = Path(args.result) / args.dataset
     result_dir.mkdir(parents=True, exist_ok=True)
-    score_dir = Path(args.score_result)
-    score_dir.mkdir(parents=True, exist_ok=True)
 
     model = load_student(args, device)
     optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=args.lr,
-        momentum=0.9,
-        weight_decay=args.weight_decay,
-        nesterov=True,
+        model.parameters(), lr=args.lr, momentum=0.9,
+        weight_decay=args.weight_decay, nesterov=True,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # Support: always from train set with hard labels
     support = ImageFolder(os.path.join(args.data, "train"), transform=train_transform())
+    support_loader = DataLoader(
+        support, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=args.cuda,
+        persistent_workers=args.workers > 0,
+        prefetch_factor=2 if args.workers > 0 else None,
+    )
+
+    # Query: from the chosen split with teacher soft labels
     query_transform = train_transform() if args.query_augment == "weak" else eval_transform()
     query_train = SoftScoreDataset(
-        os.path.join(args.data, args.split),
-        args.split,
-        query_transform,
-        args.teacher_score,
-    )
-    query_eval = SoftScoreDataset(
-        os.path.join(args.data, args.split),
-        args.split,
-        eval_transform(),
-        args.teacher_score,
-    )
-    support_loader = DataLoader(
-        support,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=args.cuda,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=2 if args.workers > 0 else None,
+        os.path.join(args.data, args.split), query_transform, args.teacher_score,
     )
     query_loader = DataLoader(
-        query_train,
-        batch_size=args.query_batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=args.cuda,
+        query_train, batch_size=args.query_batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=args.cuda,
         persistent_workers=args.workers > 0,
         prefetch_factor=2 if args.workers > 0 else None,
     )
-    query_eval_loader = DataLoader(
-        query_eval,
-        batch_size=args.query_batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        pin_memory=args.cuda,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=2 if args.workers > 0 else None,
-    )
+
+    # Eval: always on val set (never used for training, only for model selection)
+    val_eval_dir = os.path.join(args.data, "val")
+    if os.path.isdir(val_eval_dir):
+        use_soft_eval = (args.split == "val")
+        if use_soft_eval:
+            query_eval = SoftScoreDataset(
+                val_eval_dir, eval_transform(), args.teacher_score,
+            )
+            query_eval_loader = DataLoader(
+                query_eval, batch_size=args.query_batch_size, shuffle=False,
+                num_workers=args.workers, pin_memory=args.cuda,
+                persistent_workers=args.workers > 0,
+                prefetch_factor=2 if args.workers > 0 else None,
+            )
+        else:
+            query_eval = ImageFolder(val_eval_dir, transform=eval_transform())
+            query_eval_loader = DataLoader(
+                query_eval, batch_size=args.query_batch_size, shuffle=False,
+                num_workers=args.workers, pin_memory=args.cuda,
+                persistent_workers=args.workers > 0,
+                prefetch_factor=2 if args.workers > 0 else None,
+            )
+    else:
+        query_eval_loader = None
+        use_soft_eval = False
 
     steps_per_epoch = max(len(support_loader), len(query_loader))
     best_acc = -math.inf
@@ -224,10 +220,8 @@ def main():
             model.train()
             hard_iter = cycle(support_loader)
             soft_iter = cycle(query_loader)
-            losses = []
-            hard_losses = []
-            soft_losses = []
-            pseudo_losses = []
+            losses, hard_losses, soft_losses, pseudo_losses = [], [], [], []
+
             for _ in range(steps_per_epoch):
                 hard_images, hard_labels = next(hard_iter)
                 soft_images, _, soft_targets = next(soft_iter)
@@ -241,11 +235,10 @@ def main():
                 hard_loss = F.cross_entropy(hard_logits, hard_labels)
                 distill_loss = soft_ce(soft_logits, soft_targets, args.temperature)
                 pseudo_loss = F.cross_entropy(soft_logits, soft_targets.argmax(dim=1))
-                loss = (
-                    args.hard_weight * hard_loss
-                    + args.soft_weight * distill_loss
-                    + args.pseudo_hard_weight * pseudo_loss
-                )
+
+                loss = (args.hard_weight * hard_loss
+                        + args.soft_weight * distill_loss
+                        + args.pseudo_hard_weight * pseudo_loss)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -257,20 +250,23 @@ def main():
                 pseudo_losses.append(pseudo_loss.item())
 
             scheduler.step()
+
+            # Evaluate on val set for model selection
             acc = None
-            if args.split == "val":
-                acc = evaluate(model, query_eval_loader, device)
+            if query_eval_loader is not None:
+                if use_soft_eval:
+                    acc = evaluate_soft(model, query_eval_loader, device)
+                else:
+                    acc = evaluate_hard(model, query_eval_loader, device)
                 if acc > best_acc:
                     best_acc = acc
-                    torch.save(
-                        {
-                            "state_dict": model.state_dict(),
-                            "epoch": epoch,
-                            "best_acc": best_acc,
-                            "args": vars(args),
-                        },
-                        best_path,
-                    )
+                    torch.save({
+                        "state_dict": model.state_dict(),
+                        "epoch": epoch,
+                        "best_acc": best_acc,
+                        "args": vars(args),
+                    }, best_path)
+
             row = {
                 "epoch": epoch,
                 "loss": sum(losses) / len(losses),
@@ -286,22 +282,15 @@ def main():
             log_f.write(json.dumps(row, sort_keys=True) + "\n")
             log_f.flush()
 
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "epoch": args.epochs,
-            "best_acc": best_acc if best_acc > -math.inf else None,
-            "args": vars(args),
-        },
-        last_path,
-    )
+    torch.save({
+        "state_dict": model.state_dict(),
+        "epoch": args.epochs,
+        "best_acc": best_acc if best_acc > -math.inf else None,
+        "args": vars(args),
+    }, last_path)
 
-    if args.split == "test":
-        score_path = score_dir / f"{args.dataset}_score.csv"
-        evaluate(model, query_eval_loader, device, write_score_path=score_path)
-        print(json.dumps({"score_file": str(score_path)}, sort_keys=True))
-    else:
-        print(json.dumps({"best_model": str(best_path), "best_accuracy": best_acc}, sort_keys=True))
+    print(json.dumps({"best_model": str(best_path), "best_accuracy": best_acc},
+                     sort_keys=True))
 
 
 if __name__ == "__main__":
