@@ -30,3 +30,6 @@ __pycache__/
 .DS_Store
 *.mat
 *.pdf
+
+/configs
+/scripts
