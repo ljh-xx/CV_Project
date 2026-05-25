@@ -59,23 +59,23 @@ data/
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Step 1: 骨干网络预训练（官方 pretrain 数据，200 类）         │
-│    pretrain.py / main.py  →  results/pretrain/model_best.pth │
+│    pretrain.py  →  results/pretrain/model_best.pth         │
 ├─────────────────────────────────────────────────────────┤
-│  Step 2: 教师软标签生成（仅对 val 集）                       │
-│    teacher_proto.py  →  Score_teacher_val/Taskx_score.csv   │
+│  Step 2: 教师 K-fold 软标签（仅对 train 集，4 折交叉验证）    │
+│    teacher_kfold.py  →  Score_teacher_train_kfold/        │
 ├─────────────────────────────────────────────────────────┤
-│  Step 3: 知识蒸馏（学生在 val 上模仿教师，test 不参与）        │
-│    distill_task_student.py  →  results/distill_val/Taskx/   │
+│  Step 3: 知识蒸馏（学生仅在 train 集上学习，val 仅评估）       │
+│    distill_task_student.py  →  results/distill/Taskx/      │
 ├─────────────────────────────────────────────────────────┤
 │  Step 4: 原型推理（蒸馏 backbone + 原型分类 → test 一次性前向） │
-│    infer_proto.py  →  Score_student/Taskx_score.csv         │
+│    infer_proto.py  →  Score_student/Taskx_score.csv        │
 ├─────────────────────────────────────────────────────────┤
 │  Step 5: 格式转换                                           │
-│    score_to_predictions.py  →  Submission_student/          │
+│    score_to_predictions.py  →  Submission_student/         │
 └─────────────────────────────────────────────────────────┘
 ```
 
-所有训练仅使用官方数据。测试集仅在 Step 4 中参与一次性前向推理（无梯度更新、无标签使用）。
+所有训练仅使用官方 train 数据，val 仅用于模型选择（best checkpoint 选取），不参与任何损失计算。测试集仅在 Step 4 中参与一次性前向推理（无梯度更新）。
 
 ---
 
@@ -94,52 +94,31 @@ python pretrain.py --data-root ./data/pretrain --arch se_resnet18 `
 
 或使用 demo 中更完整的训练脚本（含 MixUp/CutMix/LabelSmoothing 等）。输出为 `results/pretrain/model_best.pth`。
 
-### Step 2: 教师软标签生成
+### Step 2: 教师 K-fold 软标签生成
 
-用冻结的公开 DINOv2 模型提取特征，在验证集上通过原型分类生成软标签。此处教师不使用任何 DLUT 标签进行训练：
+在 train 集上使用 4 折交叉验证生成软标签。每折以 12 张图为 support 构建原型、4 张图为 query 计算概率，避免 self-match 导致的标签退化：
 
 ```powershell
-# 生成教师对 val 集的软标签（供蒸馏使用）
-python teacher_proto.py --data-root ./data --task all --split val `
-    --write-score --result ./Score_teacher_val --cuda --batch-size 64 --workers 4
+python teacher_kfold.py --data-root ./data --task all --k 4 `
+    --result ./Score_teacher_train_kfold --cuda --batch-size 64
 ```
 
 教师模型从 timm 自动下载（首次运行需联网），之后缓存到本地。
 
 ### Step 3: 知识蒸馏
 
-学生模型（SE-ResNet18）以预训练 checkpoint 初始化，在验证集上学习教师的软标签分布。**测试集不参与此步骤**：
+学生模型以预训练 checkpoint 初始化，在 **train 集**上学习教师的 K-fold 软标签。**val 仅用于模型选择**（选取 best checkpoint），不参与损失计算：
 
 ```powershell
-# 对四个任务分别蒸馏（可并行或逐个运行）
+# 对四个任务分别蒸馏
 python distill_task_student.py --data ./data/Task1 --dataset Task1 --num-classes 102 `
-    --teacher-score ./Score_teacher_val/Task1_score.csv --split val `
-    --pretrained ./results/pretrain/model_best.pth --result results/distill_val `
+    --teacher-score ./Score_teacher_train_kfold/Task1_score.csv --split train `
+    --pretrained ./results/pretrain/model_best.pth --result results/distill `
     --epochs 30 --batch-size 64 --query-batch-size 256 --lr 0.01 `
     --soft-weight 1.0 --hard-weight 0.5 --pseudo-hard-weight 1.0 `
     --temperature 1.0 --query-augment none --workers 4 --cuda
 
-python distill_task_student.py --data ./data/Task2 --dataset Task2 --num-classes 100 `
-    --teacher-score ./Score_teacher_val/Task2_score.csv --split val `
-    --pretrained ./results/pretrain/model_best.pth --result results/distill_val `
-    --epochs 30 --batch-size 64 --query-batch-size 256 --lr 0.01 `
-    --soft-weight 1.0 --hard-weight 0.5 --pseudo-hard-weight 1.0 `
-    --temperature 1.0 --query-augment none --workers 4 --cuda
-
-python distill_task_student.py --data ./data/Task3 --dataset Task3 --num-classes 101 `
-    --teacher-score ./Score_teacher_val/Task3_score.csv --split val `
-    --pretrained ./results/pretrain/model_best.pth --result results/distill_val `
-    --epochs 30 --batch-size 64 --query-batch-size 256 --lr 0.01 `
-    --soft-weight 1.0 --hard-weight 0.5 --pseudo-hard-weight 1.0 `
-    --temperature 1.0 --query-augment none --workers 4 --cuda
-
-python distill_task_student.py --data ./data/Task4 --dataset Task4 --num-classes 37 `
-    --teacher-score ./Score_teacher_val/Task4_score.csv --split val `
-    --pretrained ./results/pretrain/model_best.pth --result results/distill_val `
-    --epochs 30 --batch-size 64 --query-batch-size 256 --lr 0.01 `
-    --soft-weight 1.0 --hard-weight 0.5 --pseudo-hard-weight 1.0 `
-    --temperature 1.0 --query-augment none --workers 4 --cuda
-```
+# Task2-4 同理，修改 --data, --dataset, --num-classes, --teacher-score 对应项
 
 **损失函数说明**：
 
@@ -154,8 +133,7 @@ python distill_task_student.py --data ./data/Task4 --dataset Task4 --num-classes
 取蒸馏后学生的 backbone（丢弃 FC 层），对测试集进行纯归纳式原型分类：
 
 ```powershell
-# 一次性对所有四个任务推理
-python infer_proto.py --data-root ./data --checkpoint-dir ./results/distill_val `
+python infer_proto.py --data-root ./data --checkpoint-dir ./results/distill `
     --result ./Score_student --task all --cuda --batch-size 256 --transductive-iters 0
 ```
 
@@ -209,9 +187,10 @@ python model_params_flops.py
 | 脚本 | 用途 |
 |---|---|
 | `pretrain.py` | 在官方 pretrain 数据上训练 200 类 SE-ResNet18 骨干网络 |
-| `teacher_proto.py` | 用冻结的公开 DINOv2 + 原型分类生成教师软标签 |
-| `distill_task_student.py` | 知识蒸馏：学生模仿教师软标签（仅使用 val 集） |
-| `infer_proto.py` | 蒸馏 backbone + 原型分类进行测试集推理 |
+| `teacher_kfold.py` | 用冻结 DINOv2 + K-fold 交叉验证在 train 集上生成软标签，避免 self-match |
+| `distill_task_student.py` | 知识蒸馏：学生模仿教师 K-fold 软标签（仅使用 train 集，val 仅评估） |
+| `infer_proto.py` | 蒸馏 backbone + 原型分类进行测试集一次性推理 |
+| `teacher_proto.py` | 教师对 val/test 做原型分类（调试用，不参与训练管线） |
 | `score_to_predictions.py` | Score CSV → argmax 预测 CSV |
 | `model_params_flops.py` | 统计模型参数量和计算量 |
 | `compare_preds.py` | 比较两个预测文件的一致性 |
@@ -220,11 +199,9 @@ python model_params_flops.py
 
 ## 8. 教师模型说明
 
-教师使用 `vit_small_patch14_dinov2.lvd142m`（从 timm 加载公开预训练权重）。DINOv2 未在 DLUT 数据上训练，仅作为冻结的特征提取器，配合原型分类生成软标签。
+教师使用 `vit_small_patch14_dinov2.lvd142m`（从 timm 加载公开预训练权重）。DINOv2 未在 DLUT 数据上训练，仅作为冻结的特征提取器，配合 K-fold 交叉验证在 train 集上生成软标签。K-fold 确保查询图片不在自身原型中，避免软标签退化为 one-hot。
 
-蒸馏规则允许教师模型使用公开预训练权重，最终提交的学生模型不包含任何公开预训练权重。
-
-教师仅对验证集生成软标签供学生蒸馏使用，不参与最终推理。
+蒸馏规则允许教师模型使用公开预训练权重，最终提交的学生模型不包含任何公开预训练权重。教师仅对 train 集生成软标签供学生蒸馏使用，不参与最终推理。
 
 ---
 
