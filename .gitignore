@@ -35,6 +35,7 @@ __pycache__/
 /scripts
 /docs
 /figures
-plot_curves.py
-plot_pretrain.py
+/plot_curves.py
+/plot_pretrain.py
 /score_to_predictions.py
+/compare_preds.py
