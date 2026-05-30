@@ -6,7 +6,7 @@ import pandas as pd
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--best", default="Submission_student/test_predictions_best.csv")
-    parser.add_argument("--current", default="Submission_student/test_predictions.csv")
+    parser.add_argument("--current", default="Submission_student/test_predictions_0.csv")
     args = parser.parse_args()
 
     best = pd.read_csv(args.best)

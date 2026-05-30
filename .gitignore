@@ -33,3 +33,8 @@ __pycache__/
 
 /configs
 /scripts
+/docs
+/figures
+plot_curves.py
+plot_pretrain.py
+/score_to_predictions.py
