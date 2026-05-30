@@ -1,41 +1,51 @@
-# Models
+# ==============================================
+# 模型文件
+# ==============================================
 *.pth
 *.pt
 *.ckpt
 
-# Data
+# ==============================================
+# 数据/结果目录（直接屏蔽整个文件夹）
+# ==============================================
 data/
 Score/
 Score_*/
 Submission/
 Submission_*/
 Score_teacher*/
-Score_teacher_test/
 Score_student/
-
-# Results
 results/
 logs/
 
-# Python
+# ==============================================
+# 你要屏蔽的核心目录（和你的结构完全对应）
+# ==============================================
+configs/
+scripts/
+docs/
+figures/
+
+# ==============================================
+# 你要屏蔽的根目录脚本（去掉了开头的/，避免歧义）
+# ==============================================
+plot_curves.py
+plot_pretrain.py
+score_to_predictions.py
+compare_preds.py
+
+# ==============================================
+# Python 环境/缓存
+# ==============================================
 __pycache__/
 *.pyc
 .venv/
 *.egg-info/
 
-# IDE
+# ==============================================
+# IDE/系统文件
+# ==============================================
 .idea/
-
-# Misc
 .DS_Store
 *.mat
 *.pdf
-
-/configs
-/scripts
-/docs
-/figures
-/plot_curves.py
-/plot_pretrain.py
-/score_to_predictions.py
-/compare_preds.py
